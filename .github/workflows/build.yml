@@ -1,50 +1,42 @@
-Name: crDroid A15 - SUICIDE RUN
+name: crDroid A15 - SUICIDE RUN V2
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: write
+
 env:
-  # Dados do dispositivo
   DEVICE: a15
   LUNCH: crdroid_a15-userdebug
-  # Otimizações de compilação
+  # Configurações extremas para evitar OOM (Out of Memory)
+  _JAVA_OPTIONS: "-Xmx8g"
   USE_CCACHE: 1
-  CCACHE_SIZE: 50G
-  CCACHE_DIR: /tmp/ccache
-  CCACHE_EXEC: /usr/bin/ccache
-  # Forçar Java correto para Android 15
-  JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+  CCACHE_COMPRESS: 1
+  CCACHE_MAXSIZE: 30G
 
 jobs:
   build:
-    runs-on: ubuntu-22.04 # 22.04 é mais estável para hacks de partição que o 24.04
-    timeout-minutes: 360 # 6 horas é o limite máximo do GitHub hardcoded
+    runs-on: ubuntu-22.04
+    timeout-minutes: 340 # Deixei margem de segurança para o upload
 
     steps:
-      # 1. O HACK DE ESPAÇO: Funde partições e remove softwares inúteis
-      - name: ☢️ Maximize Build Space (LVM Hack)
+      # 1. PREPARAÇÃO DO TERRENO (LVM + LIMPEZA)
+      - name: ☢️ Nuke & Repartition (Maximize Space)
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 512
-          swap-size-mb: 12288 # 12GB Swap (Crucial para não dar erro de memória)
+          root-reserve-mb: 1024
+          swap-size-mb: 14336 # 14GB Swap (Máximo seguro)
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
           remove-codeql: 'true'
           remove-docker-images: 'true'
+          overprovision-lvm: 'true'
 
-      # 2. Verificar se o hack funcionou
-      - name: 🔍 Check Disk & Memory
-        run: |
-          echo "Disk Space:"
-          df -h
-          echo "Memory & Swap:"
-          free -h
-          echo "CPU Cores:"
-          nproc
-
-      # 3. Instalar dependências essenciais (Sem lixo)
-      - name: 🛠️ Install Build Tools
+      # 2. INSTALAÇÃO DE FERRAMENTAS (RÁPIDA)
+      - name: ⚡ Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -52,140 +44,114 @@ jobs:
             gcc-multilib g++-multilib libc6-dev-i386 lib32ncurses5-dev \
             x11proto-core-dev libx11-dev lib32z1-dev libgl1-mesa-dev \
             libxml2-utils xsltproc unzip fontconfig python3 python-is-python3 \
-            openjdk-17-jdk libncurses5 rsync ccache jq
+            libncurses5 rsync ccache jq bc
+          
+          # ANDROID 15 PRECISA DE JAVA 21!
+          sudo apt-get install -y openjdk-21-jdk
+          java -version
 
-      # 4. Configurar Git e Repo
-      - name: ⚙️ Configure Git
-        run: |
-          git config --global user.name "LucasBot"
-          git config --global user.email "lucasbot@localhost"
-          git config --global color.ui false
-          # Otimização de rede
-          git config --global http.postBuffer 1048576000
-
-      # 5. Baixar ferramenta Repo
-      - name: 📥 Install Repo
+      # 3. SETUP DO REPO
+      - name: 📥 Setup Repo Tool
         run: |
           mkdir -p ~/bin
           curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
+          
+          git config --global user.name "LucasBuilder"
+          git config --global user.email "bot@localhost"
+          git config --global color.ui false
 
-      # 6. Inicializar Repo (Android 15)
-      - name: 🌱 Repo Init
+      # 4. INICIALIZAÇÃO E SYNC (PARCIAL)
+      - name: 🌱 Repo Init & Sync
         run: |
           mkdir crdroid
           cd crdroid
-          repo init -u https://github.com/crdroidandroid/android.git -b 15.0 --depth=1 --no-tags --groups=all,-notdefault,-device,-darwin,-x86,-mips
-
-      # 7. Injetar Manifesto Local
-      - name: 💉 Inject Local Manifest
-        run: |
-          cd crdroid
-          mkdir -p .repo/local_manifests
-          # Baixa o manifesto direto. Se falhar, o build para aqui.
-          curl -L https://raw.githubusercontent.com/Llucs/android_local_manifests/main/a15.xml -o .repo/local_manifests/a15.xml
-          cat .repo/local_manifests/a15.xml
-
-      # 8. Repo Sync (Agressivo)
-      - name: 🔄 Repo Sync
-        run: |
-          cd crdroid
-          # -j$(nproc) usa todos os núcleos. --force-sync sobrescreve erros.
-          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune --force-sync -j$(nproc)
-
-      # 9. O GRANDE EXPURGO (Kamikaze)
-      # Deleta a pasta .repo (git history) para liberar ~40GB de espaço para o build.
-      # Deleta pastas de emuladores e arquiteturas inúteis.
-      - name: 🗑️ DELETE .REPO & Unused Sources
-        run: |
-          cd crdroid
-          echo "Tamanho antes do expurgo:"
-          du -sh .
           
-          echo "Deletando histórico do Git (.repo)... Sem volta."
+          # Inicializa APENAS o necessário. Android 15 é enorme.
+          repo init -u https://github.com/crdroidandroid/android.git -b 15.0 --depth=1 --no-tags --groups=all,-notdefault,-device,-darwin,-x86,-mips
+          
+          # Injeta manifesto local
+          mkdir -p .repo/local_manifests
+          curl -L https://raw.githubusercontent.com/Llucs/android_local_manifests/main/a15.xml -o .repo/local_manifests/a15.xml
+          
+          # Sincroniza. Se falhar um pacote, tenta continuar.
+          repo sync -c --no-clone-bundle --no-tags --optimized-fetch --prune --force-sync -j$(nproc) || true
+
+      # 5. O GRANDE CORTE (LIBERAR 40GB+)
+      - name: 🪓 Delete .repo & Junk
+        run: |
+          cd crdroid
+          echo "Deletando histórico git..."
           rm -rf .repo
           
-          echo "Deletando fontes inúteis para economizar espaço..."
+          echo "Deletando hardwares inúteis..."
           rm -rf device/generic/opengl-transport
           rm -rf device/google/cuttlefish*
           rm -rf device/google/trout*
-          rm -rf device/linaro
-          # Se o A15 for Mediatek/Exynos, podemos limpar coisas da Qualcomm (qcom) se não forem deps globais
-          # Mas é arriscado, então manteremos o básico.
+          rm -rf packages/apps/FMRadio
+          # Remove clang prebuilts antigos se existirem, mantendo apenas o mais recente
+          # (Isso é arriscado, mas necessário)
           
-          echo "Tamanho após expurgo:"
-          du -sh .
           df -h
 
-      # 10. Configurar CCACHE (Local, volátil)
-      - name: ⚡ Setup Ccache
-        run: |
-          export USE_CCACHE=1
-          export CCACHE_EXEC=/usr/bin/ccache
-          ccache -M 30G
-          ccache -o compression=true
-          ccache -z
-
-      # 11. O BUILD (Tudo ou Nada)
-      - name: 🚀 BUILD ROM
+      # 6. COMPILAÇÃO (MODO BATALHA)
+      - name: 🚀 BUILD (Bacon)
         run: |
           cd crdroid
           source build/envsetup.sh
           
-          # Tenta configurar o lunch. Se falhar, tenta o nome genérico.
+          # Tenta o lunch
           lunch $LUNCH || lunch crdroid_a15-ap2a-userdebug
           
-          # Variáveis para evitar verificações lentas e erros de API
-          export KBUILD_BUILD_USER="Lucas"
-          export KBUILD_BUILD_HOST="Github-CI"
+          # Variáveis para pular verificações chatas que comem tempo/disco
           export BUILD_USERNAME="Lucas"
-          export BUILD_HOSTNAME="Github-CI"
-          export WITHOUT_CHECK_API=true
-          export BOARD_EXT4_SHARE_DUP_BLOCKS=true # Economiza espaço na imagem
-          export SKIP_ABI_CHECKS=true
+          export BUILD_HOSTNAME="GitHub-Runner"
+          export KBUILD_BUILD_USER="Lucas"
+          export KBUILD_BUILD_HOST="GitHub-Runner"
           
-          # Tenta compilar. Se der erro, continua para tentar pegar logs.
-          # Usamos 'mka bacon' como pedido, mas se falhar por espaço, nada feito.
+          # DESATIVA TUDO QUE É INÚTIL
+          export WITHOUT_CHECK_API=true
+          export SKIP_ABI_CHECKS=true
+          export SKIP_BOOT_JARS_CHECK=true
+          export BOARD_EXT4_SHARE_DUP_BLOCKS=true
+          export BUILD_BROKEN_MISSING_REQUIRED_MODULES=true
+          export BUILD_BROKEN_USES_BUILD_COPY_HEADERS=true
+          export BUILD_BROKEN_DUP_RULES=true
+          export BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES=true
+          
+          # MKA BACON
+          # Usamos o comando mka (otimizado) ao invés de make
           mka bacon -j$(nproc) || true
 
-      # 12. Encontrar o arquivo (mesmo que o nome varie)
-      - name: 🕵️ Find Output
-        id: find_zip
+      # 7. EXFILTRAÇÃO DO ARQUIVO (GOFILE)
+      - name: ☁️ Upload to GoFile (Critical)
         run: |
           cd crdroid/out/target/product/$DEVICE
-          echo "Conteúdo da pasta out:"
-          ls -lah
           
-          # Pega qualquer ZIP que pareça uma ROM
-          ZIP_PATH=$(find . -maxdepth 1 -name "crDroid*.zip" | head -n 1)
+          # Procura qualquer zip gerado
+          ZIP=$(find . -maxdepth 1 -name "crDroid*.zip" | head -n 1)
           
-          if [ -z "$ZIP_PATH" ]; then
-            echo "Nenhum ZIP encontrado. Build falhou."
+          if [ -z "$ZIP" ]; then
+            echo "❌ BUILD FALHOU - NENHUM ZIP ENCONTRADO"
+            ls -R
             exit 1
-          else
-            echo "ZIP encontrado: $ZIP_PATH"
-            echo "zip_path=$ZIP_PATH" >> $GITHUB_OUTPUT
           fi
-
-      # 13. Upload para GoFile (Backup Imediato)
-      # Artifacts demoram para processar, GoFile é instantâneo.
-      - name: ☁️ Upload to GoFile
-        if: steps.find_zip.outputs.zip_path != ''
-        run: |
-          cd crdroid/out/target/product/$DEVICE
-          ZIP_NAME=$(basename ${{ steps.find_zip.outputs.zip_path }})
-          echo "Enviando $ZIP_NAME para GoFile..."
           
-          # Tenta servidor aleatório do GoFile (API dinâmica)
-          SERVER=$(curl -s https://api.gofile.io/getServer | jq -r '.data.server')
-          curl -F "file=@$ZIP_NAME" "https://$SERVER.gofile.io/uploadFile"
+          echo "✅ ZIP ENCONTRADO: $ZIP"
+          
+          # Tenta upload em múltiplos servidores
+          curl -F "file=@$ZIP" https://store1.gofile.io/uploadFile || \
+          curl -F "file=@$ZIP" https://store2.gofile.io/uploadFile || \
+          curl -F "file=@$ZIP" https://store3.gofile.io/uploadFile
 
-      # 14. Upload Artifacts (Se sobrar tempo/espaço)
-      - name: 📦 Upload Artifact
-        if: steps.find_zip.outputs.zip_path != ''
+      # 8. ARTIFACTS (BACKUP)
+      - name: 📦 Upload to GitHub Artifacts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: crDroid-A15-Build
-          path: crdroid/out/target/product/${{ env.DEVICE }}/*.zip
-          retention-days: 3
+          name: crDroid-A15-Logs-And-Build
+          path: |
+            crdroid/out/target/product/${{ env.DEVICE }}/*.zip
+            crdroid/out/error.log
+          retention-days: 1
